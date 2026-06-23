@@ -346,9 +346,13 @@ run_tilelang_fused_sigmoid_gating_delta_rule(
       select_launch_num_seqs(actual_n, nk, nv, dk, dv, block_v, dtype);
 
   const auto options = query.options();
+  const auto state_options = query.options().dtype(torch::kFloat32);
+  const auto init_state_accum = init_state.scalar_type() == torch::kFloat32
+                                    ? init_state
+                                    : init_state.to(torch::kFloat32);
 
   auto out = torch::empty({query.size(0), nv, dv}, options);
-  auto final_state = torch::empty({compiled_n, nv, dk, dv}, options);
+  auto final_state = torch::empty({compiled_n, nv, dk, dv}, state_options);
   CHECK_EQ(out.stride(2), 1);
   CHECK_EQ(out.stride(1), dv);
   CHECK_EQ(final_state.stride(3), 1);
@@ -393,7 +397,7 @@ run_tilelang_fused_sigmoid_gating_delta_rule(
             static_cast<uint8_t*>(key.data_ptr()),
             static_cast<uint8_t*>(value.data_ptr()),
             static_cast<uint8_t*>(beta.data_ptr()),
-            static_cast<uint8_t*>(init_state.data_ptr()),
+            static_cast<uint8_t*>(init_state_accum.data_ptr()),
             static_cast<uint8_t*>(indices_prepared.data_ptr()),
             static_cast<uint8_t*>(cu_prepared.data_ptr()),
             static_cast<uint8_t*>(out.data_ptr()),
@@ -403,7 +407,7 @@ run_tilelang_fused_sigmoid_gating_delta_rule(
             static_cast<int32_t>(use_qk_l2norm ? 1 : 0),
             softplus_threshold,
             static_cast<int32_t>(query.size(0)),
-            static_cast<int32_t>(init_state.size(0)),
+            static_cast<int32_t>(init_state_accum.size(0)),
             stream);
 
   auto final_state_sliced = final_state.narrow(0, 0, actual_n);

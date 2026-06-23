@@ -1184,10 +1184,10 @@ torch::Tensor fused_sigmoid_gating_delta_rule_update(
     v_padded = v;
   }
 
-  // A_log/dt_bias/init_state are float32; others are bf16 — kernel handles
-  // mixed dtype natively.
+  // A_log/dt_bias/state accumulation are float32; token inputs are bf16.
   auto init_state_small =
-      torch::index_select(params.initial_state_source, 0, indices);
+      torch::index_select(params.initial_state_source, 0, indices)
+          .to(torch::kFloat32);
   auto indices_remapped = torch::arange(
       num_seqs, torch::dtype(torch::kInt32).device(indices.device()));
 

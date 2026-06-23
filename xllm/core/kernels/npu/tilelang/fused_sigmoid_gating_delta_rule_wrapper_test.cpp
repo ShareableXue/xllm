@@ -66,7 +66,7 @@ std::tuple<torch::Tensor, torch::Tensor> torch_fused_sigmoid_gating_delta_rule(
   const auto dv = value.size(3);
   const int64_t num_seqs = cu_seqlens.size(0) - 1;
   const float scale = 1.0F / std::sqrt(static_cast<float>(dk));
-  const float l2_norm_eps = 1e-12F;
+  const float l2_norm_eps = 1e-6F;
   const int64_t v_per_k = nv / nk;
   const auto fp32_opts = query.options().dtype(torch::kFloat32);
 
@@ -126,8 +126,7 @@ std::tuple<torch::Tensor, torch::Tensor> torch_fused_sigmoid_gating_delta_rule(
     }
   }
 
-  auto final_state = state.to(query.scalar_type());
-  return {out.to(query.scalar_type()), final_state};
+  return {out.to(query.scalar_type()), state};
 }
 
 void run_fused_sigmoid_gating_delta_rule_case(
@@ -148,6 +147,8 @@ void run_fused_sigmoid_gating_delta_rule_case(
 
   const auto bf16_opts =
       torch::TensorOptions().dtype(torch::kBFloat16).device(device);
+  const auto fp32_opts =
+      torch::TensorOptions().dtype(torch::kFloat32).device(device);
   const auto i32_opts =
       torch::TensorOptions().dtype(torch::kInt32).device(device);
 
@@ -157,16 +158,16 @@ void run_fused_sigmoid_gating_delta_rule_case(
   const int64_t dk = test_case.dk;
   const int64_t dv = test_case.dv;
 
-  auto A_log = torch::randn({nv}, bf16_opts);
+  auto A_log = torch::randn({nv}, fp32_opts);
   auto a = torch::randn({padded_tokens, nv}, bf16_opts);
-  auto dt_bias = torch::randn({nv}, bf16_opts);
+  auto dt_bias = torch::randn({nv}, fp32_opts);
   auto query = torch::randn({padded_tokens, nk, dk}, bf16_opts);
   auto key = torch::randn({padded_tokens, nk, dk}, bf16_opts);
   auto value = torch::randn({padded_tokens, nv, dv}, bf16_opts);
   auto beta = torch::randn({padded_tokens, nv}, bf16_opts);
 
   int64_t num_cache_slots = num_seqs * 2;
-  auto init_state = torch::randn({num_cache_slots, nv, dk, dv}, bf16_opts);
+  auto init_state = torch::randn({num_cache_slots, nv, dk, dv}, fp32_opts);
   auto ssm_state_indices = torch::arange(num_seqs, i32_opts);
   auto cu_seqlens = torch::tensor(cu_seqlens_vec, i32_opts);
 

@@ -307,21 +307,21 @@ def build_fused_sigmoid_gating_delta_rule_kernel(
                             ],
                         )
 
-                    # T.tile.cast(h_store_vec, h_vec, "CAST_RINT", vec_block_v * dk)
-                    # T.set_flag("v", "mte3", 5)
-                    # T.wait_flag("v", "mte3", 5)
                     T.barrier_all()
-                    test_ub = T.alloc_ub(vec_block_v, input_dtype)
-                    T.copy(h_vec[79, :], test_ub)
-                    if work_i == 4 and vid == 1 and cid == 6:
-                        T.dump_tensor(test_ub, 111, vec_block_v)
-                    T.copy(
-                        # h_store_vec,
-                        h_vec,
-                        final_state[
-                            seq_idx, v_head_idx, :, v_offset : v_offset + vec_block_v
-                        ],
-                    )
+                    T.set_flag("v", "mte3", 5)
+                    T.wait_flag("v", "mte3", 5)
+                    for dk_i in T.serial(dk):
+                        T.copy(
+                            h_vec[dk_i, :],
+                            final_state[
+                                seq_idx,
+                                v_head_idx,
+                                dk_i,
+                                v_offset : v_offset + vec_block_v,
+                            ],
+                        )
+                    T.set_flag("mte3", "v", 6)
+                    T.wait_flag("mte3", "v", 6)
 
     return main
 

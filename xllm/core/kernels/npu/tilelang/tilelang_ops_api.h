@@ -92,7 +92,7 @@ chunk_gated_delta_rule_fwd_h(const torch::Tensor& k,
 // Run fused sigmoid-gating delta-rule SSM scan on NPU.
 // Returns (out, final_state).
 //   out: [T_padded, nv, dv] (padded token dim; caller strips padding)
-//   final_state: [num_seqs, nv, dk, dv]
+//   final_state: [num_seqs, nv, dk, dv], float32 accumulator state
 // Invalid inputs trigger CHECK failures.
 std::tuple<torch::Tensor, torch::Tensor> fused_sigmoid_gating_delta_rule(
     const torch::Tensor& A_log,
