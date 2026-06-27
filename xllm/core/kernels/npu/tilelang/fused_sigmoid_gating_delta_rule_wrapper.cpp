@@ -442,13 +442,6 @@ std::tuple<torch::Tensor, torch::Tensor> fused_sigmoid_gating_delta_rule(
                   ssm_state_indices,
                   cu_seqlens);
 
-  std::cout << "[fused_sigmoid_gating_delta_rule] "
-            << "A_log" << A_log.sizes() << " a" << a.sizes() << " dt_bias"
-            << dt_bias.sizes() << " query" << query.sizes() << " key"
-            << key.sizes() << " value" << value.sizes() << " beta"
-            << beta.sizes() << " init_state" << init_state.sizes()
-            << " cu_seqlens" << cu_seqlens.sizes() << std::endl;
-
   const float runtime_scale =
       scale.has_value() ? scale.value()
                         : 1.0f / std::sqrt(static_cast<float>(query.size(2)));
