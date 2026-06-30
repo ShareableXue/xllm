@@ -1159,12 +1159,11 @@ torch::Tensor fused_sigmoid_gating_delta_rule_update(
 #if defined(USE_NPU)
   constexpr int64_t kTokenPadding = 64;
 
-  const auto& indices = params.initial_state_indices;
   const auto& cu = params.cu_seqlens;
-  const int64_t num_seqs = indices.size(0);
   const int64_t total_tokens = cu.size(0) - 1;
 
-  // Pad q/k/v token dim to total_tokens + kTokenPadding.
+  // The TileLang fused kernel still expects tail padding on q/k/v; a/beta
+  // keep the real token length described by cu_seqlens.
   const int64_t padded_tokens = total_tokens + kTokenPadding;
   auto q = params.q;
   auto k = params.k;
@@ -1184,14 +1183,7 @@ torch::Tensor fused_sigmoid_gating_delta_rule_update(
     v_padded = v;
   }
 
-  // A_log/dt_bias/state accumulation are float32; token inputs are bf16.
-  auto init_state_small =
-      torch::index_select(params.initial_state_source, 0, indices)
-          .to(torch::kFloat32);
-  auto indices_remapped = torch::arange(
-      num_seqs, torch::dtype(torch::kInt32).device(indices.device()));
-
-  auto [out, final_state] = npu::tilelang::fused_sigmoid_gating_delta_rule(
+  auto result = npu::tilelang::fused_sigmoid_gating_delta_rule(
       params.A_log,
       params.a,
       params.dt_bias,
@@ -1199,19 +1191,14 @@ torch::Tensor fused_sigmoid_gating_delta_rule_update(
       k_padded,
       v_padded,
       params.b,
-      init_state_small,
-      indices_remapped,
+      params.initial_state_source,
+      params.initial_state_indices,
       cu,
       params.scale,
       params.use_qk_l2norm_in_kernel,
       params.beta,
       params.threshold);
-
-  // Write valid final states back to original ssm cache.
-  params.initial_state_source.index_put_(
-      {indices},
-      final_state.narrow(0, 0, num_seqs)
-          .to(params.initial_state_source.scalar_type()));
+  auto out = std::get<0>(result);
 
   return needs_token_pad ? out.narrow(0, 0, total_tokens) : out;
 #else

@@ -346,13 +346,12 @@ run_tilelang_fused_sigmoid_gating_delta_rule(
       select_launch_num_seqs(actual_n, nk, nv, dk, dv, block_v, dtype);
 
   const auto options = query.options();
-  const auto state_options = query.options().dtype(torch::kFloat32);
   const auto init_state_accum = init_state.scalar_type() == torch::kFloat32
                                     ? init_state
                                     : init_state.to(torch::kFloat32);
 
   auto out = torch::empty({query.size(0), nv, dv}, options);
-  auto final_state = torch::empty({compiled_n, nv, dk, dv}, state_options);
+  auto final_state = init_state_accum;
   CHECK_EQ(out.stride(2), 1);
   CHECK_EQ(out.stride(1), dv);
   CHECK_EQ(final_state.stride(3), 1);

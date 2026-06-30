@@ -96,8 +96,7 @@ def build_fused_sigmoid_gating_delta_rule_kernel(
         ssm_state_indices: T.Tensor([max_num_seqs], "int32"),
         cu_seqlens: T.Tensor([max_num_seqs + 1], "int32"),
         out: T.Tensor([total_tokens_padded, nv, dv], input_dtype),
-        final_state: T.Tensor([max_num_seqs, nv, dk, dv], accum_dtype),
-        # final_state: T.Tensor([max_num_seqs, nv, dk, dv], input_dtype),
+        final_state: T.Tensor([num_cache_slots, nv, dk, dv], accum_dtype),
         softplus_beta: T.float32,
         scale: T.float32,
         use_qk_l2norm: T.int32,
@@ -257,13 +256,6 @@ def build_fused_sigmoid_gating_delta_rule_kernel(
                             T.tile.mul(norm_sq[0, :], q_f, q_f)
                             T.reduce_sum(norm_sq, norm_val, dim=-1)
                             T.tile.add(norm_val, norm_val, L2_NORM_EPS)
-                            # #norm_x = norm_val[0]
-                            # T.tile.rsqrt(norm_val, norm_val)
-                            # norm_scalar = norm_val[0]
-                            # #norm_scalar = norm_scalar * (
-                            # #    1.5 - 0.5 * norm_x * norm_scalar * norm_scalar
-                            # #)
-                            # T.tile.mul(q_f, q_f, norm_scalar)
                             T.tile.sqrt(norm_val, norm_val)
                             norm_scalar = norm_val[0]
                             T.tile.div(q_f, q_f, norm_scalar)
@@ -271,13 +263,6 @@ def build_fused_sigmoid_gating_delta_rule_kernel(
                             T.tile.mul(norm_sq[0, :], k_f, k_f)
                             T.reduce_sum(norm_sq, norm_val, dim=-1)
                             T.tile.add(norm_val, norm_val, L2_NORM_EPS)
-                            # #norm_x = norm_val[0]
-                            # T.tile.rsqrt(norm_val, norm_val)
-                            # norm_scalar = norm_val[0]
-                            # #norm_scalar = norm_scalar * (
-                            # #    1.5 - 0.5 * norm_x * norm_scalar * norm_scalar
-                            # #)
-                            # T.tile.mul(k_f, k_f, norm_scalar)
                             T.tile.sqrt(norm_val, norm_val)
                             norm_scalar = norm_val[0]
                             T.tile.div(k_f, k_f, norm_scalar)
@@ -321,16 +306,17 @@ def build_fused_sigmoid_gating_delta_rule_kernel(
 
                     T.set_flag("v", "mte3", 5)
                     T.wait_flag("v", "mte3", 5)
-                    for dk_i in T.serial(dk):
-                        T.copy(
-                            h_vec[dk_i, :],
-                            final_state[
-                                seq_idx,
-                                v_head_idx,
-                                dk_i,
-                                v_offset : v_offset + vec_block_v,
-                            ],
-                        )
+                    if state_idx >= 0:
+                        for dk_i in T.serial(dk):
+                            T.copy(
+                                h_vec[dk_i, :],
+                                final_state[
+                                    state_idx,
+                                    v_head_idx,
+                                    dk_i,
+                                    v_offset : v_offset + vec_block_v,
+                                ],
+                            )
                     T.set_flag("mte3", "v", 6)
                     T.wait_flag("mte3", "v", 6)
 
