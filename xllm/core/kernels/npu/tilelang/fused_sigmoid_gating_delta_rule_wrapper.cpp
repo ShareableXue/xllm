@@ -20,6 +20,7 @@ limitations under the License.
 
 #include <algorithm>
 #include <cstdint>
+#include <limits>
 #include <tuple>
 #include <utility>
 
@@ -34,7 +35,6 @@ limitations under the License.
 namespace xllm::kernel::npu::tilelang {
 namespace {
 
-constexpr int64_t kTokenPadding = 64;
 constexpr int32_t kVEC_NUM = 2;
 constexpr int32_t kNSpecializationMin = 1;
 constexpr int32_t kNSpecializationStep = 1;
@@ -259,11 +259,11 @@ void check_supported(const torch::Tensor& A_log,
   CHECK_EQ(init_state.stride(3), 1);
   CHECK_EQ(init_state.stride(2), dv);
   CHECK_EQ(init_state.stride(1), dk * dv);
-
-  CHECK_GE(query.size(0), cu_seqlens.size(0) - 1 + kTokenPadding)
-      << "TileLang fused_sigmoid_gating_delta_rule: query token dim must have "
-         "at least "
-      << kTokenPadding << " padding tokens";
+  CHECK_EQ(a.size(0), query.size(0))
+      << "TileLang fused_sigmoid_gating_delta_rule: a/query token dim mismatch";
+  CHECK_EQ(beta.size(0), query.size(0))
+      << "TileLang fused_sigmoid_gating_delta_rule: beta/query token dim "
+         "mismatch";
 }
 
 FusedSigmoidGatingDeltaRuleSpecialization build_runtime_specialization(
@@ -314,6 +314,20 @@ const auto* find_entry_with_fallback(
   return entry;
 }
 
+int32_t checked_i32_stride(int64_t stride,
+                           int64_t max_stride,
+                           const char* name) {
+  CHECK_GT(stride, 0) << "TileLang fused_sigmoid_gating_delta_rule: " << name
+                      << " must be positive";
+  CHECK_LE(stride, max_stride)
+      << "TileLang fused_sigmoid_gating_delta_rule: " << name
+      << " exceeds supported qkv token stride";
+  CHECK_LE(stride, static_cast<int64_t>(std::numeric_limits<int32_t>::max()))
+      << "TileLang fused_sigmoid_gating_delta_rule: " << name
+      << " exceeds int32";
+  return static_cast<int32_t>(stride);
+}
+
 std::tuple<torch::Tensor, torch::Tensor>
 run_tilelang_fused_sigmoid_gating_delta_rule(
     const torch::Tensor& A_log,
@@ -331,7 +345,7 @@ run_tilelang_fused_sigmoid_gating_delta_rule(
     bool use_qk_l2norm,
     float softplus_threshold) {
   const int64_t actual_n = ssm_state_indices.size(0);
-  const int64_t total_tokens = cu_seqlens.size(0) - 1;
+  const int64_t total_tokens = query.size(0);
   CHECK_GT(actual_n, 0)
       << "TileLang fused_sigmoid_gating_delta_rule: actual_n must be > 0";
 
@@ -344,6 +358,14 @@ run_tilelang_fused_sigmoid_gating_delta_rule(
 
   const int32_t compiled_n =
       select_launch_num_seqs(actual_n, nk, nv, dk, dv, block_v, dtype);
+  const int64_t max_qkv_token_stride =
+      static_cast<int64_t>(2) * nk * dk + static_cast<int64_t>(nv) * dv;
+  const int32_t query_stride_t = checked_i32_stride(
+      query.stride(0), max_qkv_token_stride, "query stride(0)");
+  const int32_t key_stride_t =
+      checked_i32_stride(key.stride(0), max_qkv_token_stride, "key stride(0)");
+  const int32_t value_stride_t = checked_i32_stride(
+      value.stride(0), max_qkv_token_stride, "value stride(0)");
 
   const auto options = query.options();
   const auto init_state_accum = init_state.scalar_type() == torch::kFloat32
@@ -405,6 +427,9 @@ run_tilelang_fused_sigmoid_gating_delta_rule(
             scale,
             static_cast<int32_t>(use_qk_l2norm ? 1 : 0),
             softplus_threshold,
+            query_stride_t,
+            key_stride_t,
+            value_stride_t,
             static_cast<int32_t>(query.size(0)),
             static_cast<int32_t>(init_state_accum.size(0)),
             stream);

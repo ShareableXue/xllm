@@ -74,6 +74,8 @@ def build_fused_sigmoid_gating_delta_rule_kernel(
     vec_block_v = block_v // VEC_NUM
     total_tokens_padded = T.symbolic("total_tokens_padded")
     num_cache_slots = T.symbolic("num_cache_slots")
+    max_token_stride = 2 * nk * dk + nv * dv
+    qkv_flat_size = total_tokens_padded * max_token_stride
     input_dtype = _INTERNAL_DTYPE  # "bfloat16" — TVM-supported name
 
     block_num = max_num_seqs * nv * num_v_tiles
@@ -87,9 +89,9 @@ def build_fused_sigmoid_gating_delta_rule_kernel(
         A_log: T.Tensor([nv], accum_dtype),
         a: T.Tensor([total_tokens_padded, nv], input_dtype),
         dt_bias: T.Tensor([nv], accum_dtype),
-        query: T.Tensor([total_tokens_padded, nk, dk], input_dtype),
-        key: T.Tensor([total_tokens_padded, nk, dk], input_dtype),
-        value: T.Tensor([total_tokens_padded, nv, dv], input_dtype),
+        query: T.Tensor([1, qkv_flat_size], input_dtype),
+        key: T.Tensor([1, qkv_flat_size], input_dtype),
+        value: T.Tensor([1, qkv_flat_size], input_dtype),
         beta: T.Tensor([total_tokens_padded, nv], input_dtype),
         init_state: T.Tensor([num_cache_slots, nv, dk, dv], accum_dtype),
         # init_state: T.Tensor([num_cache_slots, nv, dk, dv], input_dtype),
@@ -101,6 +103,9 @@ def build_fused_sigmoid_gating_delta_rule_kernel(
         scale: T.float32,
         use_qk_l2norm: T.int32,
         softplus_threshold: T.float32,
+        query_stride_t: T.int32,
+        key_stride_t: T.int32,
+        value_stride_t: T.int32,
     ):
         with T.Kernel(num_cores, is_npu=True) as (cid, vid):
             start_work = cid * q_tasks + T.if_then_else(cid < r_tasks, cid, r_tasks)
@@ -183,13 +188,19 @@ def build_fused_sigmoid_gating_delta_rule_kernel(
                     T.wait_flag("mte2", "v", 4)
                     dt_val = scalar_fp32[0]
 
-                    T.copy(query[seq_start, k_head_idx, :], q_buf[0, :])
-                    T.copy(key[seq_start, k_head_idx, :], k_buf[0, :])
-                    T.copy(
-                        value[seq_start, v_head_idx, v_offset : v_offset + vec_block_v],
-                        v_buf[0, :],
-                    )
-                    T.set_flag("mte2", "v", 6)
+                    if seq_len > 0:
+                        q_offset = seq_start * query_stride_t + k_head_idx * dk
+                        k_offset = seq_start * key_stride_t + k_head_idx * dk
+                        v_offset_gm = (
+                            seq_start * value_stride_t + v_head_idx * dv + v_offset
+                        )
+                        T.copy(query[0, q_offset], q_buf[0, :])
+                        T.copy(key[0, k_offset], k_buf[0, :])
+                        T.copy(
+                            value[0, v_offset_gm],
+                            v_buf[0, :],
+                        )
+                        T.set_flag("mte2", "v", 6)
 
                     for t in T.serial(seq_len):
                         token_idx = seq_start + t
@@ -234,22 +245,20 @@ def build_fused_sigmoid_gating_delta_rule_kernel(
                         if t + 1 < seq_len:
                             next_token_idx = seq_start + t + 1
                             next_buf_idx = (t + 1) % 2
-                            T.copy(
-                                query[next_token_idx, k_head_idx, :],
-                                q_buf[next_buf_idx, :],
+                            q_offset = (
+                                next_token_idx * query_stride_t + k_head_idx * dk
                             )
-                            T.copy(
-                                key[next_token_idx, k_head_idx, :],
-                                k_buf[next_buf_idx, :],
+                            k_offset = (
+                                next_token_idx * key_stride_t + k_head_idx * dk
                             )
-                            T.copy(
-                                value[
-                                    next_token_idx,
-                                    v_head_idx,
-                                    v_offset : v_offset + vec_block_v,
-                                ],
-                                v_buf[next_buf_idx, :],
+                            v_offset_gm = (
+                                next_token_idx * value_stride_t
+                                + v_head_idx * dv
+                                + v_offset
                             )
+                            T.copy(query[0, q_offset], q_buf[next_buf_idx, :])
+                            T.copy(key[0, k_offset], k_buf[next_buf_idx, :])
+                            T.copy(value[0, v_offset_gm], v_buf[next_buf_idx, :])
                             T.set_flag("mte2", "v", 6)
 
                         if use_qk_l2norm:
@@ -554,12 +563,6 @@ def main(
     if block_v is None:
         block_v = _auto_block_v(dv)
 
-    padding = 64
-
-    def pad_token_tensor(t):
-        padding_tensor = torch.zeros((padding,) + t.shape[1:], dtype=t.dtype)
-        return torch.cat([t, padding_tensor], dim=0)
-
     dtype_str = DEFAULT_DTYPE
 
     ker = fused_sigmoid_gating_delta_rule_kernel_jit(
@@ -576,12 +579,12 @@ def main(
     )
 
     A_log = A_log_cpu.to(device)
-    a = pad_token_tensor(a_cpu).to(device)
+    a = a_cpu.to(device)
     dt_bias = dt_bias_cpu.to(device)
-    query = pad_token_tensor(query_cpu.squeeze(0)).to(device)
-    key = pad_token_tensor(key_cpu.squeeze(0)).to(device)
-    value = pad_token_tensor(value_cpu.squeeze(0)).to(device)
-    beta = pad_token_tensor(beta_cpu).to(device)
+    query = query_cpu.squeeze(0).to(device)
+    key = key_cpu.squeeze(0).to(device)
+    value = value_cpu.squeeze(0).to(device)
+    beta = beta_cpu.to(device)
     init_state = init_state_cpu.to(device)
     ssm_state_indices = ssm_state_indices_cpu.to(device)
     cu_seqlens = cu_seqlens_cpu.to(device)
@@ -590,13 +593,16 @@ def main(
         A_log,
         a,
         dt_bias,
-        query,
-        key,
-        value,
+        query.reshape(1, -1),
+        key.reshape(1, -1),
+        value.reshape(1, -1),
         beta,
         init_state,
         ssm_state_indices,
         cu_seqlens,
+        query.stride(0),
+        key.stride(0),
+        value.stride(0),
     )
     out = out[:total_tokens].unsqueeze(0)
     final_state = final_state[:num_seqs]

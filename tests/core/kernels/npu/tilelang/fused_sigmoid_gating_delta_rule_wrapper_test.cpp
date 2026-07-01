@@ -27,8 +27,6 @@ limitations under the License.
 namespace xllm::kernel::npu::tilelang {
 namespace {
 
-constexpr int64_t kTokenPadding = 64;
-
 class TileLangFusedSigmoidGatingDeltaRuleWrapperTest : public ::testing::Test {
  protected:
   static void SetUpTestSuite() { torch_npu::init_npu("npu:0"); }
@@ -152,40 +150,41 @@ void run_fused_sigmoid_gating_delta_rule_case(
   const auto i32_opts =
       torch::TensorOptions().dtype(torch::kInt32).device(device);
 
-  const int64_t padded_tokens = total_tokens + kTokenPadding;
   const int64_t nk = test_case.nk;
   const int64_t nv = test_case.nv;
   const int64_t dk = test_case.dk;
   const int64_t dv = test_case.dv;
 
   auto A_log = torch::randn({nv}, fp32_opts);
-  auto a = torch::randn({padded_tokens, nv}, bf16_opts);
+  auto a = torch::randn({total_tokens, nv}, bf16_opts);
   auto dt_bias = torch::randn({nv}, fp32_opts);
-  auto query = torch::randn({padded_tokens, nk, dk}, bf16_opts);
-  auto key = torch::randn({padded_tokens, nk, dk}, bf16_opts);
-  auto value = torch::randn({padded_tokens, nv, dv}, bf16_opts);
-  auto beta = torch::randn({padded_tokens, nv}, bf16_opts);
+  const int64_t q_width = nk * dk;
+  const int64_t k_width = nk * dk;
+  const int64_t v_width = nv * dv;
+  auto qkv =
+      torch::randn({total_tokens, q_width + k_width + v_width}, bf16_opts);
+  auto query = qkv.narrow(1, 0, q_width).view({total_tokens, nk, dk});
+  auto key = qkv.narrow(1, q_width, k_width).view({total_tokens, nk, dk});
+  auto value =
+      qkv.narrow(1, q_width + k_width, v_width).view({total_tokens, nv, dv});
+  auto beta = torch::randn({total_tokens, nv}, bf16_opts);
+  ASSERT_GT(query.stride(0), nk * dk);
+  ASSERT_GT(key.stride(0), nk * dk);
+  ASSERT_GT(value.stride(0), nv * dv);
 
   int64_t num_cache_slots = num_seqs * 2;
   auto init_state = torch::randn({num_cache_slots, nv, dk, dv}, fp32_opts);
   auto ssm_state_indices = torch::arange(num_seqs, i32_opts);
   auto cu_seqlens = torch::tensor(cu_seqlens_vec, i32_opts);
 
-  // PyTorch reference (uses unpadded data).
-  auto query_ref = query.slice(0, 0, total_tokens).unsqueeze(0);
-  auto key_ref = key.slice(0, 0, total_tokens).unsqueeze(0);
-  auto value_ref = value.slice(0, 0, total_tokens).unsqueeze(0);
-  auto a_ref = a.slice(0, 0, total_tokens);
-  auto beta_ref = beta.slice(0, 0, total_tokens);
-
   auto [out_ref, final_state_ref] =
       torch_fused_sigmoid_gating_delta_rule(A_log,
-                                            a_ref,
+                                            a,
                                             dt_bias,
-                                            query_ref,
-                                            key_ref,
-                                            value_ref,
-                                            beta_ref,
+                                            query.unsqueeze(0),
+                                            key.unsqueeze(0),
+                                            value.unsqueeze(0),
+                                            beta,
                                             init_state,
                                             ssm_state_indices,
                                             cu_seqlens,
@@ -209,8 +208,7 @@ void run_fused_sigmoid_gating_delta_rule_case(
                                       test_case.softplus_beta,
                                       /*softplus_threshold=*/20.0F);
 
-  // Slice outputs back to actual sizes.
-  auto out_sliced = out_out.slice(0, 0, total_tokens).unsqueeze(0);
+  auto out_sliced = out_out.unsqueeze(0);
   auto final_state_sliced = final_state_out.slice(0, 0, num_seqs);
 
   EXPECT_TRUE(

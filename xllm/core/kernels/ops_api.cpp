@@ -1157,50 +1157,22 @@ torch::Tensor hc_pre_inv_rms(HcPreInvRmsParams& params) {
 torch::Tensor fused_sigmoid_gating_delta_rule_update(
     FusedSigmoidGatingDeltaRuleUpdateParams& params) {
 #if defined(USE_NPU)
-  constexpr int64_t kTokenPadding = 64;
-
-  const auto& cu = params.cu_seqlens;
-  const int64_t total_tokens = cu.size(0) - 1;
-
-  // The TileLang fused kernel still expects tail padding on q/k/v; a/beta
-  // keep the real token length described by cu_seqlens.
-  const int64_t padded_tokens = total_tokens + kTokenPadding;
-  auto q = params.q;
-  auto k = params.k;
-  auto v = params.v;
-  torch::Tensor q_padded, k_padded, v_padded;
-  bool needs_token_pad = q.size(0) < padded_tokens;
-  if (needs_token_pad) {
-    q_padded = torch::zeros({padded_tokens, q.size(1), q.size(2)}, q.options());
-    q_padded.narrow(0, 0, total_tokens).copy_(q.narrow(0, 0, total_tokens));
-    k_padded = torch::zeros({padded_tokens, k.size(1), k.size(2)}, k.options());
-    k_padded.narrow(0, 0, total_tokens).copy_(k.narrow(0, 0, total_tokens));
-    v_padded = torch::zeros({padded_tokens, v.size(1), v.size(2)}, v.options());
-    v_padded.narrow(0, 0, total_tokens).copy_(v.narrow(0, 0, total_tokens));
-  } else {
-    q_padded = q;
-    k_padded = k;
-    v_padded = v;
-  }
-
   auto result = npu::tilelang::fused_sigmoid_gating_delta_rule(
       params.A_log,
       params.a,
       params.dt_bias,
-      q_padded,
-      k_padded,
-      v_padded,
+      params.q,
+      params.k,
+      params.v,
       params.b,
       params.initial_state_source,
       params.initial_state_indices,
-      cu,
+      params.cu_seqlens,
       params.scale,
       params.use_qk_l2norm_in_kernel,
       params.beta,
       params.threshold);
-  auto out = std::get<0>(result);
-
-  return needs_token_pad ? out.narrow(0, 0, total_tokens) : out;
+  return std::get<0>(result);
 #else
   NOT_IMPLEMENTED();
 #endif
